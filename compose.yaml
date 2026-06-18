@@ -73,9 +73,19 @@ services:
       CORS_ALLOWED_ORIGINS: ${BASE_URL:-http://localhost}
       AUTH_BASE_URL: ${AUTH_BASE_URL:-http://localhost:3001}
       AUTHZ_ENABLED: "false"
+      # Object storage for task attachments (MinIO, S3-compatible)
+      S3_BUCKET: ${S3_BUCKET:-runa-content}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      # Attachments are streamed through the API, so this must be browser-reachable
+      PUBLIC_API_URL: ${API_BASE_URL:-http://localhost:4000}
     depends_on:
       db:
         condition: service_healthy
+      minio:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "bun -e \"fetch('http://localhost:4000/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
       interval: 10s
@@ -117,6 +127,38 @@ services:
       retries: 3
       start_period: 15s
 
+  # Object storage for task attachments (images, files). The API reads/writes
+  # via the internal endpoint; bytes are streamed to the browser through the API.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    # ports:
+    #   - "9001:9001"  # uncomment to expose the MinIO console
+
+  # One-shot: wait for MinIO and create the attachments bucket
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_PASS: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      BUCKET: ${S3_BUCKET:-runa-content}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_USER $$MINIO_PASS; do
+        echo 'waiting for minio...'; sleep 2;
+      done &&
+      mc mb -p local/$$BUCKET &&
+      echo 'minio bucket ready';
+      "
+    restart: "no"
+
   caddy:
     image: caddy:2-alpine
     ports:
@@ -136,5 +178,6 @@ services:
 volumes:
   db_data:
   auth_db_data:
+  minio_data:
   caddy_data:
   caddy_config:
